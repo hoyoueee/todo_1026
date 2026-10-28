@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN" data-arch="swa">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SWA，稀疏 full attention 的 cache 管理规则调研</title>
+<meta name="description" content="以 SWA 为主线，横向观察 DSA、MSA 在 vLLM、SGLang、DeepInfer 中的 KV cache 存储、前缀匹配、驱逐与重算规则。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23245b7a'/%3E%3Crect x='5' y='7' width='22' height='4' fill='%23ffffff'/%3E%3Crect x='8' y='15' width='16' height='4' fill='%23ffffff' opacity='.65'/%3E%3Crect x='11' y='23' width='10' height='4' fill='%23ffffff' opacity='.38'/%3E%3C/svg%3E">
+<script>document.documentElement.classList.add('js');</script>
+<link rel="stylesheet" href="assets/style.css">
+<noscript><style>.arch-panel[hidden]{display:block!important}.tabbar,.engine-tabs,.mask-grid{display:none!important}</style></noscript>
+</head>
+<body>
+
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="progress" aria-hidden="true"><span></span></div>
+
+<header class="site-header" id="siteHeader">
+  <div class="header-inner">
+    <a class="brand" href="#top" aria-label="回到页首">
+      <svg class="brand-mark" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <rect x="1" y="3" width="24" height="4" fill="currentColor"/>
+        <rect x="4" y="11" width="18" height="4" fill="currentColor" opacity=".62"/>
+        <rect x="7" y="19" width="12" height="4" fill="currentColor" opacity=".34"/>
+      </svg>
+      <span class="brand-text">KV CACHE / 调研报告<em>2026.10 · 内部讨论</em></span>
+    </a>
+    <div class="header-meta">
+      <button class="print-btn" type="button">打印 / PDF</button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ================= HEADER ================= -->
+  <section class="hero" id="top">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">技术调研 / KV CACHE MANAGEMENT</p>
+        <h1>
+          SWA，稀疏<br class="mobile-only">
+          <span class="latin">full attention</span> 的<br>
+          <span class="mark">cache 管理规则调研</span>
+        </h1>
+        <div class="hero-meta">
+          <div>
+            <span class="meta-label">覆盖架构</span>
+            <strong>SWA · DSA · MSA</strong>
+          </div>
+          <div>
+            <span class="meta-label">推理引擎</span>
+            <strong>vllm · SGLang · deepinfer</strong>
+          </div>
+          <div>
+            <span class="meta-label">资料基线</span>
+            <strong>3 份笔记 · 3 张原始截图</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ARCHITECTURES ================= -->
+  <section class="architectures" id="architectures">
+    <div class="wrap">
+      <div class="tabbar" role="tablist" aria-label="按架构切换">
+        <button class="tab is-active" id="tab-swa" role="tab" aria-selected="true" aria-controls="panel-swa" data-arch="swa" tabindex="0" style="--tab-accent:#2f6f62">
+          <span class="tab-name">SWA</span>
+        </button>
+        <button class="tab" id="tab-dsa" role="tab" aria-selected="false" aria-controls="panel-dsa" data-arch="dsa" tabindex="-1" style="--tab-accent:#40598f">
+          <span class="tab-name">DSA</span>
+        </button>
+        <button class="tab" id="tab-msa" role="tab" aria-selected="false" aria-controls="panel-msa" data-arch="msa" tabindex="-1" style="--tab-accent:#8a5a33">
+          <span class="tab-name">MSA</span>
+        </button>
+      </div>
+
+      <div class="panels">
+
+        <!-- ============ SWA ============ -->
+        <section class="arch-panel" id="panel-swa" role="tabpanel" aria-labelledby="tab-swa" data-arch="swa">
+          <h2 class="sr-only">SWA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="SWA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="swa-vllm" data-arch="swa" data-engine="vllm" id="etab-swa-vllm">
+              <span class="et-name">vllm</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="swa-sglang" data-arch="swa" data-engine="sglang" id="etab-swa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="swa-deepinfer" data-arch="swa" data-engine="deepinfer" id="etab-swa-deepinfer">
+              <span class="et-name">deepinfer</span>
+            </button>
+          </div>
+
+          <article class="engine" id="swa-vllm">
+            <h3 class="engine-title">vllm</h3>
+            <p class="verbatim">存储上保留和full-attention一样的模式，区别在于对于SWA的group中的逻辑块（block）大小与full-attention group的存在差异，整体存放的大小包括窗口大小与额外保留大小</p>
+            <div class="code-block"><pre><code>def num_retained_tokens(self) -> int:
+        """Tokens below a request's first scheduled position that must stay
+        readable. The worker nulls a step's block-table entries wholly below
+        that many tokens.
+        """
+        return self.sliding_window - 1 + self.extra_retained_tokens</code></pre></div>
+            <p class="verbatim">在进行前缀缓存的判断时，manager根据当前候选命中长度，从右至左依次按粒度比较window是否命中，存在未命中则退至下一个候选命中长度位置。</p>
+            <p class="verbatim">驱逐方面采用<strong>窗外</strong> + <strong>LRU</strong>两种模式同时进行，一方面对保留大小外的块进行驱逐，另外配合LRU的策略。</p>
+          </article>
+
+          <article class="engine" id="swa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">sglang采取的是Unified Radix Cache的存储模式，在cache的基本存储上同样与full-attention的情况相同，同一结点由SWA component维护SWA的缓冲数据，期间涉及的操作包括匹配、插入、恢复、驱逐</p>
+            <ul class="verbatim-list">
+              <li class="verbatim">驱逐   SWA component 根据其独立的LRU以及窗口大小进行驱逐，对于要驱逐的叶子结点，直接删除，对于中间结点则将SWA对应的结点value置为none，记为tombstone</li>
+              <li class="verbatim">匹配   SWA的匹配依赖于“累计长度”，从根节点开始，累计长度设为<strong>正无穷</strong>，对于任意结点，如果累计长度大于窗口长度，记为匹配边界。当遇到SWA无效节点（tombstone）累计长度归0，就这样找到最佳匹配边界</li>
+              <li class="verbatim">插入   保留正常的kv_cache插入方式。</li>
+            </ul>
+          </article>
+
+          <article class="engine" id="swa-deepinfer" hidden>
+            <h3 class="engine-title">deepinfer</h3>
+            <p class="verbatim">在官方文档中，对于SWAcache相关只进行了部分解释</p>
+            <p class="verbatim">在存储方面，将SWA KVCache进行了区分</p>
+            <img class="zoomable source-image" src="assets/deepinfer-storage.png" width="1664" height="344" alt="image-20261027101839862" loading="lazy">
+            <p class="verbatim">SWA 对应的缓存会在prefill之后再存储：<strong>位置取序列末尾留出一个 token 后向下对齐到 128 所得的位置，不足一个 128 tokens 则本轮不存储；chunked prefill 中途不存储，只有最后一个 chunk 才存储 ；decode阶段 会在副本去最近一次拷贝的位置存储。</strong></p>
+            <p class="verbatim">在匹配时，以Block KVCache为基准（假设命中L1)，只考虑L1（128token窗口可复用)、L1-128（窗口重算)两种情况。</p>
+            <p class="verbatim">重算根据encoder和decoder采用不同策略：</p>
+            <img class="zoomable source-image" src="assets/deepinfer-replay.png" width="1670" height="528" alt="image-20261027102830972" loading="lazy">
+          </article>
+        </section>
+
+        <!-- ============ DSA ============ -->
+        <section class="arch-panel" id="panel-dsa" role="tabpanel" aria-labelledby="tab-dsa" data-arch="dsa" hidden>
+          <h2 class="sr-only">DSA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="DSA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="dsa-vllm" data-arch="dsa" data-engine="vllm" id="etab-dsa-vllm">
+              <span class="et-name">vllm</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="dsa-sglang" data-arch="dsa" data-engine="sglang" id="etab-dsa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+          </div>
+
+          <article class="engine" id="dsa-vllm">
+            <h3 class="engine-title">vllm</h3>
+            <p class="verbatim">在基本存储方面，vllm为DSA分配了两块存储：Indexer K Cache（缓存历史K）、MLA KV Cache（主attention的kv_cache)。(v3 博客<a href="https://vllm.ai/blog/2025-09-29-deepseek-v3-2">https://vllm.ai/blog/2025-09-29-deepseek-v3-2</a>)</p>
+            <img class="zoomable source-image" src="assets/mla-indexer-block.png" width="2000" height="1032" alt="mla-indexer-block" loading="lazy">
+            <p class="verbatim">目前未找到有关Indexer K Cache 与 MLA KV Cache 在前缀缓存、驱逐与匹配上的特别文本说明（deepseek v3.2\v4\v4.1的vllm官方技术博客均未提及)</p>
+            <p class="verbatim">在查询同样使用DSA的GLM 5.3 的相关文档时，有查询到<strong>HiSparse</strong>驻留优化策略，同样没有对cache相关操作的介绍。</p>
+          </article>
+
+          <article class="engine" id="dsa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">sglang在DSA cache管理方面的信息也非常有限，和vllm处理类似，其单独维护了一个Index-K cache，并对Index 采用了压缩优化（Kpool + tail），其余逻辑与full-attention处理类似。同时在对应的<strong>/unified_cache</strong>目录下的<strong>component_type.py</strong>中也没有找到为DSA维护的component类型。</p>
+          </article>
+        </section>
+
+        <!-- ============ MSA ============ -->
+        <section class="arch-panel" id="panel-msa" role="tabpanel" aria-labelledby="tab-msa" data-arch="msa" hidden>
+          <h2 class="sr-only">MSA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="MSA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="msa-vllm" data-arch="msa" data-engine="vllm" id="etab-msa-vllm">
+              <span class="et-name">vLLM</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="msa-sglang" data-arch="msa" data-engine="sglang" id="etab-msa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+          </div>
+
+          <article class="engine" id="msa-vllm">
+            <h3 class="engine-title">vLLM</h3>
+            <p class="verbatim">通过vLLM关于MiniMax M3的文档，可以了解到MSA的kv_cache为 标准的存储设计 配合 稀疏运算（<strong>Standard Storage, Sparse Computation</strong>）具体来说在缓存分配上是沿用基础存储，在计算时应用稀疏性，但是为了适配运算，需要显示的跟踪主kv_cache, indexer K cache，当缓存之间的交互验证正确后，可以适用prefix cache和chunk fill。</p>
+          </article>
+
+          <article class="engine" id="msa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">通过对sglang开源代码的分析，了解到对MSA的处理与vLLM类似，sglang将MSA主缓存沿用radix tree体系，单独计算复用与驱逐，另外维护一个index K cache，用于计算主缓存中的历史block</p>
+          </article>
+        </section>
+
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <span>KV Cache 管理规则调研 · 2026.10</span>
+    <span>内部技术调研 / 仅供项目组讨论</span>
+    <a href="#top">回到顶部 ↑</a>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="查看原图">
+  <div class="lightbox-inner">
+    <button class="lightbox-close" type="button" aria-label="关闭">×</button>
+    <img id="lightboxImg" alt="放大查看的原始图片">
+    <p class="lightbox-cap" id="lightboxCap"></p>
+  </div>
+</dialog>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
