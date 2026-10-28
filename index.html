@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="zh-CN" data-arch="swa">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SWA，稀疏 full attention 的 cache 管理规则调研</title>
+<meta name="description" content="以 SWA 为主线，横向观察 DSA、MSA 在 vLLM、SGLang、DeepInfer 中的 KV cache 存储、前缀匹配、驱逐与重算规则。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23245b7a'/%3E%3Crect x='5' y='7' width='22' height='4' fill='%23ffffff'/%3E%3Crect x='8' y='15' width='16' height='4' fill='%23ffffff' opacity='.65'/%3E%3Crect x='11' y='23' width='10' height='4' fill='%23ffffff' opacity='.38'/%3E%3C/svg%3E">
+<script>document.documentElement.classList.add('js');</script>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  /* DSA / vLLM 示例图：复用 vllm_dsa_cache 页面的图形语言 */
+  .dsa-subhead {
+    margin: 26px 0 10px;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: .08em;
+  }
+  .dsa-figure { margin: 0 0 18px; }
+
+  .dsa-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .dsa-card { border: 1px solid var(--line); border-radius: 5px; padding: 15px; background: #fbfcfe; }
+  .dsa-card h4 { margin: 0 0 2px; color: var(--ink); font-size: 15px; font-weight: 600; line-height: 1.5; }
+  .dsa-sub { margin-bottom: 12px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+  .dsa-bar { display: flex; height: 38px; border: 1px solid var(--line-strong); overflow: hidden; }
+  .dsa-bar span { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 10px; white-space: nowrap; }
+  .dsa-nope { background: #2f5f9e; }
+  .dsa-scale { background: #173f70; }
+  .dsa-rope { background: #6d9bcf; }
+  .dsa-k { background: #a8641f; }
+  .dsa-kscale { background: #7d4715; }
+  .dsa-legend { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+  .dsa-total { margin-top: 7px; color: var(--ink); font-family: var(--font-mono); font-size: 10.5px; }
+  .dsa-callout {
+    margin-top: 12px; padding: 12px 14px; border-left: 3px solid #2f6f62;
+    background: #e8f1ee; color: var(--ink-2); font-size: 12.5px; line-height: 1.8;
+  }
+  .dsa-callout b { color: var(--ink); }
+
+  .dsa-svg {
+    margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 5px;
+    background: #fff; overflow-x: auto;
+  }
+  .dsa-svg svg { display: block; width: 100%; min-width: 680px; height: auto; }
+  .dsa-svg img { display: block; width: 100%; min-width: 680px; height: auto; }
+
+  .dsa-queue { display: grid; grid-template-columns: 1fr 48px 1.12fr; gap: 8px; align-items: center; }
+  .dsa-q-group { border: 1px solid var(--line); border-radius: 5px; padding: 11px; background: #fbfcfe; }
+  .dsa-q-title { margin-bottom: 6px; color: var(--muted); font-family: var(--font-mono); font-size: 9px; letter-spacing: .05em; }
+  .dsa-q-boxes { display: flex; gap: 6px; flex-wrap: wrap; }
+  .dsa-q-box { flex: 1; min-width: 58px; padding: 9px 5px; border: 1px solid var(--line-strong); background: #fff; text-align: center; color: var(--ink-2); font-size: 10.5px; }
+  .dsa-q-box.hashed { border-color: #2f6f62; background: #e8f1ee; }
+  .dsa-q-note { margin-top: 7px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+  .dsa-q-arrow { text-align: center; color: var(--muted); font-size: 11px; line-height: 1.4; }
+
+  .dsa-pageids { padding: 14px; border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; }
+  .dsa-pidrow { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .dsa-pid { padding: 3px 8px; border: 1px solid #b9cde4; border-radius: 3px; background: #eaf1fa; color: #2f5f9e; font-family: var(--font-mono); font-size: 10px; }
+  .dsa-buffers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .dsa-buffer { padding: 11px 13px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  .dsa-buffer b { display: block; margin-bottom: 3px; color: var(--ink); font-size: 13px; }
+  .dsa-buffer span { display: block; color: var(--muted); font-size: 10.5px; line-height: 1.7; }
+  .dsa-legend2 { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font-size: 10.5px; }
+  .dsa-legend2 i { display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: 1px; }
+
+  .dsa-flow { display: grid; grid-template-columns: 1fr 26px 1fr; gap: 10px; align-items: stretch; }
+  .dsa-step { padding: 12px 13px; border: 1px solid var(--line); border-radius: 4px; background: #fbfcfe; }
+  .dsa-step .n { display: block; margin-bottom: 4px; color: var(--muted); font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .05em; }
+  .dsa-step b { display: block; color: var(--ink); font-size: 13px; line-height: 1.5; }
+  .dsa-step p { margin-top: 3px; color: var(--muted); font-size: 10.5px; line-height: 1.65; }
+  .dsa-flow-arrow { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 18px; }
+
+  .msa-k { background: #2f5f9e; }
+  .msa-v { background: #6d9bcf; }
+  .msa-idx { background: #a8641f; }
+  .msa-spec-flow { display: grid; grid-template-columns: 1fr 32px 1.12fr; gap: 12px; align-items: center; }
+  .msa-spec-stack { display: flex; flex-direction: column; gap: 10px; }
+  .msa-spec { padding: 12px 13px; border: 1px solid var(--line); border-radius: 4px; background: #fbfcfe; border-left: 3px solid #2f5f9e; }
+  .msa-spec.idx { border-left-color: #a8641f; }
+  .msa-spec .role { color: var(--muted); font-family: var(--font-mono); font-size: 8px; letter-spacing: .05em; }
+  .msa-spec b { display: block; margin-top: 3px; color: var(--ink); font-size: 13px; }
+  .msa-spec p { margin-top: 3px; color: var(--muted); font-size: 10.5px; line-height: 1.65; }
+  .msa-group { padding: 14px; border: 1px solid #2f6f62; border-radius: 4px; background: #e8f1ee; }
+  .msa-group .role { color: #2f6f62; font-family: var(--font-mono); font-size: 8px; letter-spacing: .05em; }
+  .msa-group b { display: block; margin-top: 3px; color: var(--ink); font-size: 15px; }
+  .msa-group p { margin-top: 4px; color: var(--ink-2); font-size: 10.5px; line-height: 1.65; }
+  .msa-arrow { text-align: center; color: var(--muted); font-size: 18px; }
+
+  @media (max-width: 720px) {
+    .dsa-cards { grid-template-columns: 1fr; }
+    .dsa-queue { grid-template-columns: 1fr; }
+    .dsa-q-arrow { transform: rotate(90deg); }
+    .dsa-svg svg { min-width: 680px; }
+    .dsa-buffers { grid-template-columns: 1fr; }
+    .dsa-flow { grid-template-columns: 1fr; }
+    .dsa-flow-arrow { transform: rotate(90deg); }
+    .msa-spec-flow { grid-template-columns: 1fr; }
+    .msa-arrow { transform: rotate(90deg); }
+  }
+</style>
+<noscript><style>.arch-panel[hidden]{display:block!important}.tabbar,.engine-tabs,.mask-grid{display:none!important}</style></noscript>
+</head>
+<body>
+
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="progress" aria-hidden="true"><span></span></div>
+
+<header class="site-header" id="siteHeader">
+  <div class="header-inner">
+    <a class="brand" href="#top" aria-label="回到页首">
+      <svg class="brand-mark" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <rect x="1" y="3" width="24" height="4" fill="currentColor"/>
+        <rect x="4" y="11" width="18" height="4" fill="currentColor" opacity=".62"/>
+        <rect x="7" y="19" width="12" height="4" fill="currentColor" opacity=".34"/>
+      </svg>
+      <span class="brand-text">KV CACHE / 调研报告<em>2026.10 · 内部讨论</em></span>
+    </a>
+    <div class="header-meta">
+      <button class="print-btn" type="button">打印 / PDF</button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ================= HEADER ================= -->
+  <section class="hero" id="top">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">技术调研 / KV CACHE MANAGEMENT</p>
+        <h1>
+          SWA，稀疏<br class="mobile-only">
+          <span class="latin">full attention</span> 的<br>
+          <span class="mark">cache 管理规则调研</span>
+        </h1>
+        <div class="hero-meta">
+          <div>
+            <span class="meta-label">覆盖架构</span>
+            <strong>SWA · DSA · MSA</strong>
+          </div>
+          <div>
+            <span class="meta-label">推理引擎</span>
+            <strong>vllm · SGLang · deepinfer</strong>
+          </div>
+          <div>
+            <span class="meta-label">资料基线</span>
+            <strong>3 份笔记 · 3 张原始截图</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ARCHITECTURES ================= -->
+  <section class="architectures" id="architectures">
+    <div class="wrap">
+      <div class="tabbar" role="tablist" aria-label="按架构切换">
+        <button class="tab is-active" id="tab-swa" role="tab" aria-selected="true" aria-controls="panel-swa" data-arch="swa" tabindex="0" style="--tab-accent:#2f6f62">
+          <span class="tab-name">SWA</span>
+        </button>
+        <button class="tab" id="tab-dsa" role="tab" aria-selected="false" aria-controls="panel-dsa" data-arch="dsa" tabindex="-1" style="--tab-accent:#40598f">
+          <span class="tab-name">DSA</span>
+        </button>
+        <button class="tab" id="tab-msa" role="tab" aria-selected="false" aria-controls="panel-msa" data-arch="msa" tabindex="-1" style="--tab-accent:#8a5a33">
+          <span class="tab-name">MSA</span>
+        </button>
+      </div>
+
+      <div class="panels">
+
+        <!-- ============ SWA ============ -->
+        <section class="arch-panel" id="panel-swa" role="tabpanel" aria-labelledby="tab-swa" data-arch="swa">
+          <h2 class="sr-only">SWA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="SWA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="swa-vllm" data-arch="swa" data-engine="vllm" id="etab-swa-vllm">
+              <span class="et-name">vllm</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="swa-sglang" data-arch="swa" data-engine="sglang" id="etab-swa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="swa-deepinfer" data-arch="swa" data-engine="deepinfer" id="etab-swa-deepinfer">
+              <span class="et-name">deepinfer</span>
+            </button>
+          </div>
+
+          <article class="engine" id="swa-vllm">
+            <h3 class="engine-title">vllm</h3>
+            <p class="verbatim">存储上保留和full-attention一样的模式，区别在于对于SWA的group中的逻辑块（block）大小与full-attention group的存在差异，整体存放的大小包括窗口大小与额外保留大小</p>
+            <div class="code-block"><pre><code>def num_retained_tokens(self) -> int:
+        """Tokens below a request's first scheduled position that must stay
+        readable. The worker nulls a step's block-table entries wholly below
+        that many tokens.
+        """
+        return self.sliding_window - 1 + self.extra_retained_tokens</code></pre></div>
+            <p class="verbatim">在进行前缀缓存的判断时，manager根据当前候选命中长度，从右至左依次按粒度比较window是否命中，存在未命中则退至下一个候选命中长度位置。</p>
+            <p class="verbatim">例如：</p>
+            <img class="zoomable source-image" src="assets/sw-attn.png" width="614" height="60" alt="sw_attn" loading="lazy">
+            <p class="verbatim">缓存命中前缀可能有 3 种：</p>
+            <ul class="verbatim-list">
+              <li class="verbatim">缓存命中长度为 5，计算预填充 [2, 3, 4] → [5, 6, …, 14]</li>
+              <li class="verbatim">缓存命中长度为 6，计算预填充为 [3, 4, 5] → [6, 7, …, 14]</li>
+              <li class="verbatim">缓存命中长度为 14，使用 [11, 12, 13] → [14] 进行预填充（效率最高）</li>
+            </ul>
+            <p class="verbatim">驱逐方面采用<strong>窗外</strong> + <strong>LRU</strong>两种模式同时进行，一方面对保留大小外的块进行驱逐，另外配合LRU的策略。</p>
+            <figure class="figure figure--wide" aria-labelledby="swa-evict-caption">
+              <img class="zoomable" src="assets/vllm-swa-evict.png" width="1254" height="316" alt="vLLM SWA KV Cache 释放与驱逐逻辑图解" loading="lazy" data-caption="vLLM SWA：窗口外释放 + LRU">
+              <figcaption id="swa-evict-caption"><b>图 1</b> vLLM SWA：窗口外块被释放；若无人引用则进入 free list；释放由 KV Cache Manager 主动触发。</figcaption>
+            </figure>
+          </article>
+
+          <article class="engine" id="swa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">sglang采取的是Unified Radix Cache的存储模式，在cache的基本存储上同样与full-attention的情况相同，同一结点由SWA component维护SWA的缓冲数据，期间涉及的操作包括匹配、插入、恢复、驱逐</p>
+            <ul class="verbatim-list">
+              <li class="verbatim">驱逐   SWA component 根据其独立的LRU以及窗口大小进行驱逐，对于要驱逐的叶子结点，直接删除，对于中间结点则将SWA对应的结点value置为none，记为tombstone</li>
+              <li class="verbatim">匹配   SWA的匹配依赖于“累计长度”，从根节点开始，累计长度设为<strong>正无穷</strong>，对于任意结点，如果累计长度大于窗口长度，记为匹配边界。当遇到SWA无效节点（tombstone）累计长度归0，就这样找到最佳匹配边界</li>
+              <li class="verbatim">插入   保留正常的kv_cache插入方式。</li>
+            </ul>
+            <figure class="figure figure--wide" aria-labelledby="swa-sglang-match-caption">
+              <div style="overflow-x:auto">
+                <img class="zoomable" src="assets/swa-sglang-match.svg" width="900" height="500" alt="SGLang SWA 匹配示例：累计长度与 tombstone" loading="lazy" style="min-width:760px" data-caption="SGLang SWA 匹配示例">
+              </div>
+              <figcaption id="swa-sglang-match-caption"><b>图 1</b> SGLang SWA 匹配：root 的累计长度从 +∞ 开始；A 是 tombstone，累计长度归 0；B 累加到 4，C 到 8（不大于 8），D 到 12 才越过窗口，最佳匹配边界为 D。</figcaption>
+            </figure>
+            <figure class="figure figure--wide" aria-labelledby="swa-sglang-evict-caption">
+              <div style="overflow-x:auto">
+                <img class="zoomable" src="assets/swa-sglang-evict.svg" width="900" height="560" alt="SGLang SWA 驱逐示例：叶子删除与中间结点 tombstone" loading="lazy" style="min-width:760px" data-caption="SGLang SWA 驱逐示例">
+              </div>
+              <figcaption id="swa-sglang-evict-caption"><b>图 2</b> SGLang SWA 驱逐：窗外只是候选，不等于立即失效；未被 LRU 选中的 N1/N2/L2 保留 SWA value；叶子 L1 直接删除，中间结点 M 的 SWA value 置为 None（tombstone），FULL attention value 保留。</figcaption>
+            </figure>
+          </article>
+
+          <article class="engine" id="swa-deepinfer" hidden>
+            <h3 class="engine-title">deepinfer</h3>
+            <p class="verbatim">在官方文档中，对于SWAcache相关只进行了部分解释</p>
+            <p class="verbatim">在存储方面，将SWA KVCache进行了区分</p>
+            <img class="zoomable source-image" src="assets/deepinfer-storage.png" width="1664" height="344" alt="image-20261027101839862" loading="lazy">
+            <p class="verbatim">SWA 对应的缓存会在prefill之后再存储：<strong>位置取序列末尾留出一个 token 后向下对齐到 128 所得的位置，不足一个 128 tokens 则本轮不存储；chunked prefill 中途不存储，只有最后一个 chunk 才存储 ；decode阶段 会在副本去最近一次拷贝的位置存储。</strong></p>
+            <p class="verbatim">在匹配时，以Block KVCache为基准（假设命中L1)，只考虑L1（128token窗口可复用)、L1-128（窗口重算)两种情况。</p>
+            <p class="verbatim">重算根据encoder和decoder采用不同策略：</p>
+            <img class="zoomable source-image" src="assets/deepinfer-replay.png" width="1670" height="528" alt="image-20261027102830972" loading="lazy">
+          </article>
+        </section>
+
+        <!-- ============ DSA ============ -->
+        <section class="arch-panel" id="panel-dsa" role="tabpanel" aria-labelledby="tab-dsa" data-arch="dsa" hidden>
+          <h2 class="sr-only">DSA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="DSA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="dsa-vllm" data-arch="dsa" data-engine="vllm" id="etab-dsa-vllm">
+              <span class="et-name">vllm</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="dsa-sglang" data-arch="dsa" data-engine="sglang" id="etab-dsa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+          </div>
+
+          <article class="engine" id="dsa-vllm">
+            <h3 class="engine-title">vllm</h3>
+            <p class="verbatim">在基本存储方面，vllm为DSA分配了两块存储：Indexer K Cache（缓存历史K）、MLA KV Cache（主attention的kv_cache)。(v3 博客<a href="https://vllm.ai/blog/2025-09-29-deepseek-v3-2">https://vllm.ai/blog/2025-09-29-deepseek-v3-2</a>)</p>
+
+            <h4 class="dsa-subhead">存储模式</h4>
+            <div class="dsa-figure">
+              <div class="dsa-cards">
+                <div class="dsa-card">
+                  <h4>主 MLA KV cache</h4>
+                  <div class="dsa-sub">MLAAttentionSpec · cache_role=SPARSE</div>
+                  <div class="dsa-bar" aria-label="主 MLA 每 token 的 656 字节布局">
+                    <span class="dsa-nope" style="flex:512">NoPE 512 B</span>
+                    <span class="dsa-scale" style="flex:16"></span>
+                    <span class="dsa-rope" style="flex:128">RoPE 128 B</span>
+                  </div>
+                  <div class="dsa-legend">512 B NoPE（fp8）· <b>16 B scale</b>（4 × float32）· 128 B RoPE（64 × bf16）</div>
+                  <div class="dsa-total">656 B / token</div>
+                </div>
+                <div class="dsa-card">
+                  <h4>Indexer K cache</h4>
+                  <div class="dsa-sub">MLAAttentionSpec · cache_role=INDEXER</div>
+                  <div class="dsa-bar" aria-label="Indexer K 每 token 的 132 字节布局">
+                    <span class="dsa-k" style="flex:128">K 128 B</span>
+                    <span class="dsa-kscale" style="flex:4"></span>
+                  </div>
+                  <div class="dsa-legend">128 B indexer K（fp8 / mxfp4）· <b>4 B scale</b>（UE8M0，每 128 维一个）</div>
+                  <div class="dsa-total">132 B / token</div>
+                </div>
+              </div>
+              <div class="dsa-callout"><b>合起来：</b>带 indexer 的一层，主 MLA + indexer K = <b>788 B / token</b>；如果 block_size = 64，一层的一对 page 是 <b>50,432 B</b>（41,984 B 主 MLA + 8,448 B indexer）。</div>
+            </div>
+
+            <h4 class="dsa-subhead">KV cache group</h4>
+            <div class="dsa-figure dsa-svg">
+              <svg viewBox="0 0 860 430" role="img" aria-label="DSA 一个物理 block 内包含主 MLA 和 indexer 的所有 layer page">
+                <text x="20" y="30" font-size="10" fill="#687583" font-family="monospace">GROUP BLOCK TABLE</text>
+                <rect x="20" y="44" width="210" height="250" rx="5" fill="#fbfcfe" stroke="#dfe4ea"/>
+                <text x="34" y="66" font-size="11" fill="#1f2933" font-family="monospace">logical → physical</text>
+                <g font-size="12" font-family="monospace" fill="#3d4b59">
+                  <text x="42" y="96">0</text><text x="82" y="96">→</text><text x="110" y="96">5</text><line x1="34" y1="108" x2="216" y2="108" stroke="#e7ebf0"/>
+                  <text x="42" y="134">1</text><text x="82" y="134">→</text><text x="110" y="134">7</text><line x1="34" y1="146" x2="216" y2="146" stroke="#e7ebf0"/>
+                  <text x="42" y="172">2</text><text x="82" y="172">→</text><text x="110" y="172">9</text><line x1="34" y1="184" x2="216" y2="184" stroke="#e7ebf0"/>
+                  <text x="42" y="210">3</text><text x="82" y="210">→</text><text x="110" y="210">12</text>
+                </g>
+                <text x="34" y="250" font-size="10.5" fill="#687583">一个 group 一张表</text>
+                <text x="34" y="268" font-size="10.5" fill="#687583">主 MLA + indexer 共用</text>
+
+                <text x="300" y="30" font-size="10" fill="#687583" font-family="monospace">PHYSICAL BLOCK #7 / 64 TOKENS</text>
+                <rect x="300" y="44" width="530" height="300" rx="6" fill="#ffffff" stroke="#2f6f62" stroke-width="1.5"/>
+                <text x="318" y="66" font-size="10.5" fill="#2f6f62" font-family="monospace">block hash H(tokens 0..63)</text>
+
+                <text x="318" y="96" font-size="11" fill="#3d4b59" font-family="monospace">L0 main</text>
+                <rect x="390" y="82" width="300" height="18" rx="2" fill="#2f5f9e"/>
+                <text x="700" y="96" font-size="10" fill="#687583">41,984 B</text>
+                <text x="318" y="122" font-size="11" fill="#3d4b59" font-family="monospace">L0 indexer</text>
+                <rect x="390" y="108" width="100" height="18" rx="2" fill="#a8641f"/>
+                <text x="500" y="122" font-size="10" fill="#687583">8,448 B</text>
+
+                <text x="318" y="160" font-size="11" fill="#3d4b59" font-family="monospace">L1 main</text>
+                <rect x="390" y="146" width="300" height="18" rx="2" fill="#2f5f9e"/>
+                <text x="700" y="160" font-size="10" fill="#687583">41,984 B</text>
+                <text x="318" y="186" font-size="11" fill="#3d4b59" font-family="monospace">L1 indexer</text>
+                <rect x="390" y="172" width="100" height="18" rx="2" fill="#a8641f"/>
+                <text x="500" y="186" font-size="10" fill="#687583">8,448 B</text>
+
+                <text x="318" y="224" font-size="11" fill="#3d4b59" font-family="monospace">L2 main</text>
+                <rect x="390" y="210" width="300" height="18" rx="2" fill="#2f5f9e"/>
+                <text x="700" y="224" font-size="10" fill="#687583">41,984 B</text>
+                <text x="318" y="250" font-size="11" fill="#3d4b59" font-family="monospace">L2 indexer</text>
+                <rect x="390" y="236" width="100" height="18" rx="2" fill="#a8641f"/>
+                <text x="500" y="250" font-size="10" fill="#687583">8,448 B</text>
+
+                <text x="318" y="284" font-size="12" fill="#687583" font-family="monospace">···</text>
+                <text x="390" y="284" font-size="10.5" fill="#687583">其余层同理；没有 indexer 的层只有 main page</text>
+
+                <text x="318" y="314" font-size="11" fill="#3d4b59" font-family="monospace">L60 main</text>
+                <rect x="390" y="300" width="300" height="18" rx="2" fill="#2f5f9e"/>
+                <text x="318" y="340" font-size="11" fill="#3d4b59" font-family="monospace">L60 indexer</text>
+                <rect x="390" y="326" width="100" height="18" rx="2" fill="#a8641f"/>
+
+                <rect x="20" y="360" width="12" height="12" fill="#2f5f9e"/><text x="38" y="370" font-size="11" fill="#687583">主 MLA page</text>
+                <rect x="140" y="360" width="12" height="12" fill="#a8641f"/><text x="158" y="370" font-size="11" fill="#687583">indexer K page</text>
+                <text x="300" y="370" font-size="10.5" fill="#687583">block page = Σ 所有 layer page；block-outermost 布局</text>
+              </svg>
+            </div>
+
+            <p class="verbatim">从图中可以看到虽然每层有两种cache，实际上都属于一个block。</p>
+
+            <h4 class="dsa-subhead">前缀缓存</h4>
+            <div class="dsa-figure dsa-svg">
+              <svg viewBox="0 0 860 330" role="img" aria-label="DSA 前缀缓存按 block hash 命中，主 MLA 和 indexer 一同复用">
+                <g font-family="monospace" font-size="11">
+                  <rect x="40" y="30" width="180" height="36" rx="4" fill="#e8f1ee" stroke="#2f6f62"/>
+                  <text x="58" y="53" fill="#1f2933">tokens 0–63</text>
+                  <rect x="238" y="30" width="180" height="36" rx="4" fill="#e8f1ee" stroke="#2f6f62"/>
+                  <text x="256" y="53" fill="#1f2933">tokens 64–127</text>
+                  <rect x="436" y="30" width="180" height="36" rx="4" fill="#f6f7f9" stroke="#c9d1da"/>
+                  <text x="454" y="53" fill="#687583">tokens 128–191</text>
+                  <rect x="634" y="30" width="180" height="36" rx="4" fill="#f6f7f9" stroke="#c9d1da"/>
+                  <text x="652" y="53" fill="#687583">tokens 192–255</text>
+                </g>
+
+                <g font-family="monospace" font-size="10">
+                  <circle cx="130" cy="105" r="20" fill="#ffffff" stroke="#2f6f62"/><text x="122" y="109" fill="#2f6f62">H0</text>
+                  <circle cx="328" cy="105" r="20" fill="#ffffff" stroke="#2f6f62"/><text x="320" y="109" fill="#2f6f62">H1</text>
+                  <circle cx="526" cy="105" r="20" fill="#ffffff" stroke="#c9d1da"/><text x="518" y="109" fill="#687583">H2</text>
+                  <circle cx="724" cy="105" r="20" fill="#ffffff" stroke="#c9d1da"/><text x="716" y="109" fill="#687583">H3</text>
+                </g>
+                <g stroke="#2f6f62" stroke-width="1.5" fill="none">
+                  <path d="M150 105 H308"/><path d="M348 105 H506"/>
+                </g>
+                <g stroke="#c9d1da" stroke-width="1.5" fill="none">
+                  <path d="M546 105 H704"/>
+                </g>
+                <text x="130" y="145" font-size="10.5" fill="#2f6f62" text-anchor="middle" font-family="monospace">HIT</text>
+                <text x="328" y="145" font-size="10.5" fill="#2f6f62" text-anchor="middle" font-family="monospace">HIT</text>
+                <text x="526" y="145" font-size="10.5" fill="#687583" text-anchor="middle" font-family="monospace">MISS</text>
+                <text x="724" y="145" font-size="10.5" fill="#687583" text-anchor="middle" font-family="monospace">MISS</text>
+
+                <rect x="40" y="175" width="378" height="66" rx="5" fill="#fbfcfe" stroke="#2f6f62"/>
+                <text x="56" y="196" font-size="10.5" fill="#2f6f62" font-family="monospace">命中 block 的内容</text>
+                <rect x="56" y="208" width="220" height="14" rx="2" fill="#2f5f9e"/>
+                <text x="284" y="219" font-size="10" fill="#3d4b59">主 MLA page</text>
+                <rect x="56" y="226" width="80" height="8" rx="2" fill="#a8641f"/>
+                <text x="144" y="235" font-size="10" fill="#3d4b59">+ indexer page（同一 block）</text>
+
+                <rect x="436" y="175" width="378" height="66" rx="5" fill="#f8f9fa" stroke="#dfe4ea"/>
+                <text x="452" y="196" font-size="10.5" fill="#687583" font-family="monospace">未命中：需要重新 prefill</text>
+                <text x="452" y="218" font-size="11" fill="#687583">block hash 不连续，命中到此为止</text>
+                <text x="452" y="234" font-size="11" fill="#687583">主 MLA + indexer 都重新计算/写入</text>
+
+                <rect x="40" y="270" width="774" height="36" rx="4" fill="#f8efe2" stroke="#a8641f"/>
+                <text x="56" y="293" font-size="11" fill="#7d4715" font-family="monospace">top-k indices buffer</text>
+                <text x="240" y="293" font-size="11" fill="#7d4715">不参与 block hash，不进入 prefix cache；每次请求重新选 top-k</text>
+              </svg>
+            </div>
+
+            <p class="verbatim">对匹配与驱逐也同样：在前缀cache匹配时会按块进行匹配，匹配成则同时采纳块中的的Indexer 和 MLA cache；驱逐时，会同时对两种cache进行驱逐。</p>
+
+            <h4 class="dsa-subhead">驱逐策略</h4>
+            <div class="dsa-figure">
+              <div class="dsa-queue">
+                <div class="dsa-q-group">
+                  <div class="dsa-q-title">队首 · 先复用</div>
+                  <div class="dsa-q-boxes">
+                    <div class="dsa-q-box">未缓存</div>
+                    <div class="dsa-q-box">未缓存</div>
+                    <div class="dsa-q-box">未缓存</div>
+                  </div>
+                  <div class="dsa-q-note">LIFO，优先拿最近释放的未缓存 block</div>
+                </div>
+                <div class="dsa-q-arrow">←<br>分配</div>
+                <div class="dsa-q-group">
+                  <div class="dsa-q-title">队尾 · 最后复用</div>
+                  <div class="dsa-q-boxes">
+                    <div class="dsa-q-box hashed">有 hash</div>
+                    <div class="dsa-q-box hashed">有 hash</div>
+                    <div class="dsa-q-box hashed">有 hash</div>
+                  </div>
+                  <div class="dsa-q-note">LRU：最久未用的 cached block 先被复用；复用前删除 hash</div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="engine" id="dsa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">sglang在DSA cache管理方面和vllm处理类似，其单独维护了一个Index-K cache，并对Index 采用了压缩优化（Kpool + tail），其余逻辑与mla-attention处理类似。</p>
+
+            <h4 class="dsa-subhead">存储</h4>
+            <div class="dsa-figure">
+              <div class="dsa-pageids">
+                <div class="dsa-pidrow">
+                  <span class="dsa-pid">P0</span>
+                  <span class="dsa-pid">P1</span>
+                  <span class="dsa-pid">P2</span>
+                  <span class="dsa-pid">P3</span>
+                </div>
+                <div class="dsa-buffers">
+                  <div class="dsa-buffer">
+                    <b>main pool</b>
+                    <span>P0 → MLA main page 0<br>P1 → MLA main page 1<br>P2 → MLA main page 2<br>P3 → MLA main page 3</span>
+                  </div>
+                  <div class="dsa-buffer">
+                    <b>IndexKeyCache（每层）</b>
+                    <span>P0 → index K page 0<br>P1 → index K page 1<br>P2 → index K page 2<br>P3 → index K page 3</span>
+                  </div>
+                </div>
+                <div class="dsa-legend2">
+                  <span><i style="background:#2f5f9e"></i>main MLA page</span>
+                  <span><i style="background:#a8641f"></i>index K page</span>
+                  <span>同一个 page id，两份物理数据</span>
+                </div>
+              </div>
+            </div>
+
+            <h4 class="dsa-subhead">匹配</h4>
+            <div class="dsa-figure dsa-svg">
+              <img src="assets/dsa-sglang-match.svg" width="900" height="500" alt="DSA / SGLang 匹配示例：token 前缀树与 page id" loading="lazy">
+            </div>
+
+            <h4 class="dsa-subhead">驱逐</h4>
+            <div class="dsa-figure">
+              <div class="dsa-flow">
+                <div class="dsa-step">
+                  <span class="n">STEP 1</span>
+                  <b>evictable leaves</b>
+                  <p>按 eviction_strategy（默认 LRU）取叶子。</p>
+                </div>
+                <div class="dsa-flow-arrow">→</div>
+                <div class="dsa-step">
+                  <span class="n">STEP 2</span>
+                  <b>free_segment(page ids)</b>
+                  <p>把叶子 value 里的 page id 还给 allocator。</p>
+                </div>
+                <div class="dsa-step">
+                  <span class="n">STEP 3</span>
+                  <b>main page 不可达</b>
+                  <p>page id 被回收/复用后，main page 失效。</p>
+                </div>
+                <div class="dsa-flow-arrow">→</div>
+                <div class="dsa-step">
+                  <span class="n">STEP 4</span>
+                  <b>index page 跟着失效</b>
+                  <p>IndexKeyCache 没有单独的 free；page id 复用后旧 index page 被覆盖。</p>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <!-- ============ MSA ============ -->
+        <section class="arch-panel" id="panel-msa" role="tabpanel" aria-labelledby="tab-msa" data-arch="msa" hidden>
+          <h2 class="sr-only">MSA</h2>
+          <div class="engine-tabs" role="tablist" aria-label="MSA 推理引擎">
+            <button class="engine-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="msa-vllm" data-arch="msa" data-engine="vllm" id="etab-msa-vllm">
+              <span class="et-name">vLLM</span>
+            </button>
+            <button class="engine-tab" type="button" role="tab" aria-selected="false" aria-controls="msa-sglang" data-arch="msa" data-engine="sglang" id="etab-msa-sglang">
+              <span class="et-name">SGLang</span>
+            </button>
+          </div>
+
+          <article class="engine" id="msa-vllm">
+            <h3 class="engine-title">vLLM</h3>
+            <p class="verbatim">通过vLLM关于MiniMax M3的文档，可以了解到MSA的kv_cache为 标准的存储设计 配合 稀疏运算（<strong>Standard Storage, Sparse Computation</strong>）具体来说在缓存分配上是沿用基础存储，在计算时应用稀疏性，但是为了适配运算，需要显示的跟踪主kv_cache, indexer K cache，当缓存之间的交互验证正确后，可以适用prefix cache和chunk fill。</p>
+
+            <h4 class="dsa-subhead">存储模式</h4>
+            <div class="dsa-figure">
+              <div class="dsa-cards">
+                <div class="dsa-card">
+                  <h4>主 GQA K/V cache</h4>
+                  <div class="dsa-sub">FullAttentionSpec · num_kv_heads=4 · head_size=128</div>
+                  <div class="dsa-bar" aria-label="MSA 主 GQA K/V 每 token 的 2048 字节布局">
+                    <span class="msa-k" style="flex:1024">K · 1,024 B</span>
+                    <span class="msa-v" style="flex:1024">V · 1,024 B</span>
+                  </div>
+                  <div class="dsa-legend">4 个 KV head × 128 dim × 2 B（bf16）；K 和 V 各一半。</div>
+                  <div class="dsa-total">2,048 B / token · 256 KiB / 128-token block</div>
+                </div>
+                <div class="dsa-card">
+                  <h4>Indexer side cache</h4>
+                  <div class="dsa-sub">MLAAttentionSpec · key-only · num_kv_heads=1</div>
+                  <div class="dsa-bar" aria-label="MSA indexer side cache 每 token 的 256 字节布局">
+                    <span class="msa-idx" style="flex:256">index K · 256 B</span>
+                  </div>
+                  <div class="dsa-legend">1 个 index-key vector / token；默认 bf16，可切 fp8。</div>
+                  <div class="dsa-total">256 B / token · 32 KiB / 128-token block</div>
+                </div>
+              </div>
+              <div class="dsa-callout"><b>合计（bf16）：</b>2,048 + 256 = <b>2,304 B / token</b>；一个 128-token block 是 <b>288 KiB</b>（主 256 KiB + indexer 32 KiB）。</div>
+            </div>
+
+            <h4 class="dsa-subhead">group 构成</h4>
+            <div class="dsa-figure">
+              <div class="msa-spec-flow">
+                <div class="msa-spec-stack">
+                  <div class="msa-spec">
+                    <span class="role">MAIN GQA</span>
+                    <b>FullAttentionSpec</b>
+                    <p>num_kv_heads=4 · head_size=128 · head_size_v=128 · dtype=bf16/fp8</p>
+                  </div>
+                  <div class="msa-spec idx">
+                    <span class="role">INDEXER KEY</span>
+                    <b>MLAAttentionSpec</b>
+                    <p>num_kv_heads=1 · head_size=128 · key-only · dtype=bf16/fp8</p>
+                  </div>
+                </div>
+                <div class="msa-arrow">→</div>
+                <div class="msa-group">
+                  <span class="role">GROUP</span>
+                  <b>UniformTypeKVCacheSpecs</b>
+                  <p>两者都落在 <code>FullAttentionSpec</code> 这个 uniform type 下 → 合并为一个 group。</p>
+                  <p><b>1 个 KV cache group · 1 张 block table</b></p>
+                </div>
+              </div>
+            </div>
+
+            <h4 class="dsa-subhead">前缀匹配</h4>
+            <div class="dsa-figure dsa-svg">
+              <svg viewBox="0 0 860 280" role="img" aria-label="MSA 前缀缓存按 128 token block hash 命中，主 K/V 和 indexer key 一起复用">
+                <g font-family="monospace" font-size="11">
+                  <rect x="40" y="30" width="180" height="36" rx="4" fill="#e8f1ee" stroke="#2f6f62"/>
+                  <text x="58" y="53" fill="#1f2933">tokens 0–127</text>
+                  <rect x="238" y="30" width="180" height="36" rx="4" fill="#e8f1ee" stroke="#2f6f62"/>
+                  <text x="256" y="53" fill="#1f2933">tokens 128–255</text>
+                  <rect x="436" y="30" width="180" height="36" rx="4" fill="#f6f7f9" stroke="#c9d1da"/>
+                  <text x="454" y="53" fill="#687583">tokens 256–383</text>
+                  <rect x="634" y="30" width="180" height="36" rx="4" fill="#f6f7f9" stroke="#c9d1da"/>
+                  <text x="652" y="53" fill="#687583">tokens 384–511</text>
+                </g>
+                <g font-family="monospace" font-size="10">
+                  <circle cx="130" cy="105" r="20" fill="#ffffff" stroke="#2f6f62"/><text x="122" y="109" fill="#2f6f62">H0</text>
+                  <circle cx="328" cy="105" r="20" fill="#ffffff" stroke="#2f6f62"/><text x="320" y="109" fill="#2f6f62">H1</text>
+                  <circle cx="526" cy="105" r="20" fill="#ffffff" stroke="#c9d1da"/><text x="518" y="109" fill="#687583">H2</text>
+                  <circle cx="724" cy="105" r="20" fill="#ffffff" stroke="#c9d1da"/><text x="716" y="109" fill="#687583">H3</text>
+                </g>
+                <g stroke="#2f6f62" stroke-width="1.5" fill="none"><path d="M150 105 H308"/><path d="M348 105 H506"/></g>
+                <g stroke="#c9d1da" stroke-width="1.5" fill="none"><path d="M546 105 H704"/></g>
+                <text x="130" y="145" font-size="10.5" fill="#2f6f62" text-anchor="middle" font-family="monospace">HIT</text>
+                <text x="328" y="145" font-size="10.5" fill="#2f6f62" text-anchor="middle" font-family="monospace">HIT</text>
+                <text x="526" y="145" font-size="10.5" fill="#687583" text-anchor="middle" font-family="monospace">MISS</text>
+                <text x="724" y="145" font-size="10.5" fill="#687583" text-anchor="middle" font-family="monospace">MISS</text>
+
+                <rect x="40" y="176" width="378" height="64" rx="5" fill="#fbfcfe" stroke="#2f6f62"/>
+                <text x="56" y="197" font-size="10.5" fill="#2f6f62" font-family="monospace">命中 block 的内容</text>
+                <rect x="56" y="210" width="200" height="14" rx="2" fill="#2f5f9e"/>
+                <text x="264" y="221" font-size="10" fill="#3d4b59">主 GQA K/V</text>
+                <rect x="56" y="228" width="70" height="7" rx="2" fill="#a8641f"/>
+                <text x="134" y="235" font-size="10" fill="#3d4b59">+ indexer key（同一 block）</text>
+
+                <rect x="436" y="176" width="378" height="64" rx="5" fill="#f8f9fa" stroke="#dfe4ea"/>
+                <text x="452" y="197" font-size="10.5" fill="#687583" font-family="monospace">未命中：重新 prefill / 写入</text>
+                <text x="452" y="219" font-size="11" fill="#687583">block hash 不连续，命中到此为止</text>
+                <text x="452" y="235" font-size="11" fill="#687583">主 K/V + indexer key 都重新算</text>
+              </svg>
+            </div>
+
+            <h4 class="dsa-subhead">驱逐</h4>
+            <div class="dsa-figure">
+              <div class="dsa-queue">
+                <div class="dsa-q-group">
+                  <div class="dsa-q-title">队首 · 先复用</div>
+                  <div class="dsa-q-boxes">
+                    <div class="dsa-q-box">未缓存</div>
+                    <div class="dsa-q-box">未缓存</div>
+                    <div class="dsa-q-box">未缓存</div>
+                  </div>
+                  <div class="dsa-q-note">LIFO，优先拿最近释放的未缓存 block</div>
+                </div>
+                <div class="dsa-q-arrow">←<br>分配</div>
+                <div class="dsa-q-group">
+                  <div class="dsa-q-title">队尾 · 最后复用</div>
+                  <div class="dsa-q-boxes">
+                    <div class="dsa-q-box hashed">有 hash</div>
+                    <div class="dsa-q-box hashed">有 hash</div>
+                    <div class="dsa-q-box hashed">有 hash</div>
+                  </div>
+                  <div class="dsa-q-note">LRU；复用前删除 hash</div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="engine" id="msa-sglang" hidden>
+            <h3 class="engine-title">SGLang</h3>
+            <p class="verbatim">通过对sglang开源代码的分析，了解到对MSA的处理与vLLM类似，sglang将MSA主缓存沿用radix tree体系，单独计算复用与驱逐，另外维护一个index K cache，用于计算主缓存中的历史block</p>
+
+            <h4 class="dsa-subhead">存储模式</h4>
+            <div class="dsa-figure">
+              <div class="dsa-cards">
+                <div class="dsa-card">
+                  <h4>main：GQA K/V</h4>
+                  <div class="dsa-sub">main_pool · page_size=128</div>
+                  <div class="dsa-bar" aria-label="MSA main GQA K/V 每 token 的 2048 字节布局">
+                    <span class="msa-k" style="flex:1024">K · 1,024 B</span>
+                    <span class="msa-v" style="flex:1024">V · 1,024 B</span>
+                  </div>
+                  <div class="dsa-legend">4 KV head × 256 dim（K+V）× 2 B（bf16）= 2,048 B/token。</div>
+                  <div class="dsa-total">page：128 × 2,048 = 256 KiB</div>
+                </div>
+                <div class="dsa-card">
+                  <h4>index：index_k_pool</h4>
+                  <div class="dsa-sub">key-only · 每层一份 · page_size=128</div>
+                  <div class="dsa-bar" aria-label="MSA index K 每 token 的 256 字节布局">
+                    <span class="msa-idx" style="flex:256">index K · 256 B</span>
+                  </div>
+                  <div class="dsa-legend">1 个 head × 128 dim × 2 B（bf16）= 256 B/token。</div>
+                  <div class="dsa-total">page：128 × 256 = 32 KiB</div>
+                </div>
+              </div>
+              <div class="dsa-callout"><b>一个 page 的合计：</b>256 KiB + 32 KiB = <b>288 KiB</b>；每 token 2,048 + 256 = <b>2,304 B</b>。</div>
+
+              <div class="dsa-pageids" style="margin-top:12px">
+                <div class="dsa-pidrow">
+                  <span class="dsa-pid">P0</span>
+                  <span class="dsa-pid">P1</span>
+                  <span class="dsa-pid">P2</span>
+                  <span class="dsa-pid">P3</span>
+                </div>
+                <div class="dsa-buffers">
+                  <div class="dsa-buffer">
+                    <b>main_pool</b>
+                    <span>P0 → K/V page 0（256 KiB）<br>P1 → K/V page 1<br>P2 → K/V page 2<br>P3 → K/V page 3</span>
+                  </div>
+                  <div class="dsa-buffer">
+                    <b>index_k_pool（每层）</b>
+                    <span>P0 → index K page 0（32 KiB）<br>P1 → index K page 1<br>P2 → index K page 2<br>P3 → index K page 3</span>
+                  </div>
+                </div>
+                <div class="dsa-legend2">
+                  <span><i style="background:#2f5f9e"></i>GQA main page</span>
+                  <span><i style="background:#a8641f"></i>index K page</span>
+                  <span>同一个 page id，两份物理数据</span>
+                </div>
+              </div>
+            </div>
+
+            <h4 class="dsa-subhead">匹配</h4>
+            <div class="dsa-figure dsa-svg">
+              <img src="assets/msa-sglang-match.svg" width="900" height="500" alt="MSA / SGLang 匹配示例：token 前缀树与 page id" loading="lazy">
+            </div>
+
+            <h4 class="dsa-subhead">驱逐</h4>
+            <div class="dsa-figure dsa-svg">
+              <img src="assets/msa-sglang-evict.svg" width="900" height="540" alt="MSA / SGLang 驱逐示例：radix 树叶子 LRU" loading="lazy">
+            </div>
+          </article>
+        </section>
+
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <span>KV Cache 管理规则调研 · 2026.10</span>
+    <span>内部技术调研 / 仅供项目组讨论</span>
+    <a href="#top">回到顶部 ↑</a>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="查看原图">
+  <div class="lightbox-inner">
+    <button class="lightbox-close" type="button" aria-label="关闭">×</button>
+    <img id="lightboxImg" alt="放大查看的原始图片">
+    <p class="lightbox-cap" id="lightboxCap"></p>
+  </div>
+</dialog>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560" role="img" aria-labelledby="title desc">
+  <title id="title">SGLang SWA 驱逐示例</title>
+  <desc id="desc">Unified Radix Cache 的 SWA 驱逐：窗外与独立 LRU 共同触发；叶子结点直接删除，中间结点将 SWA value 置为 None 形成 tombstone，而 FULL attention value 保留。</desc>
+  <style>
+    text { font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+    .title { font-size: 20px; font-weight: 600; fill: #1b2530; }
+    .sub { font-size: 10.5px; fill: #6b7785; }
+    .card-title { font-size: 10.5px; font-weight: 600; fill: #1b2530; }
+    .small { font-size: 9px; fill: #6b7785; }
+    .small-dark { font-size: 9px; fill: #3d4a57; }
+    .tag { font-size: 8.5px; letter-spacing: .03em; }
+    .accent { fill: #2f6f62; }
+    .red { fill: #a33a32; }
+    .amber { fill: #8a5a33; }
+    .line { stroke: #cbd2d9; stroke-width: 1.5; fill: none; }
+    .card { fill: #ffffff; stroke: #cbd2d9; stroke-width: 1; }
+    .card-soft { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; }
+    .card-tomb { fill: #fbf3e9; stroke: #b9814c; stroke-width: 1.4; }
+    .card-del { fill: #fdf3f2; stroke: #c98b86; stroke-width: 1.4; stroke-dasharray: 5 4; }
+  </style>
+
+  <rect width="900" height="560" fill="#ffffff"/>
+  <text x="24" y="32" class="title">SGLang SWA · 驱逐示例</text>
+  <text x="24" y="54" class="sub">Unified Radix Cache · window = 8 tokens（示例）· SWA component 的独立 LRU + 窗外（窗外 = 候选，不是立即失效）</text>
+  <text x="876" y="32" text-anchor="end" class="tag accent">INDEPENDENT LRU</text>
+
+  <!-- 连线 -->
+  <path class="line" d="M116 111 H132"/>
+  <path class="line" d="M230 111 H246"/>
+  <path class="line" d="M344 111 H360"/>
+  <path class="line" d="M458 111 H474"/>
+  <path class="line" d="M295 140 V218"/>
+  <path class="line" d="M280 282 V310 H192 V340"/>
+  <path class="line" d="M330 282 V340"/>
+
+  <!-- root / path -->
+  <rect x="24" y="82" width="92" height="58" rx="4" class="card-soft"/>
+  <text x="38" y="103" class="card-title">root</text>
+  <text x="38" y="121" class="small">FULL: value</text>
+  <text x="38" y="134" class="small">SWA: value</text>
+
+  <rect x="132" y="82" width="98" height="58" rx="4" class="card"/>
+  <text x="144" y="103" class="card-title">N1 · 4</text>
+  <text x="144" y="121" class="small">FULL: value</text>
+  <text x="144" y="134" class="small">SWA: value</text>
+
+  <rect x="246" y="82" width="98" height="58" rx="4" class="card"/>
+  <text x="258" y="103" class="card-title">N2 · 4</text>
+  <text x="258" y="121" class="small">FULL: value</text>
+  <text x="258" y="134" class="small">SWA: value</text>
+
+  <rect x="360" y="82" width="98" height="58" rx="4" class="card"/>
+  <text x="372" y="103" class="card-title">N3 · 4</text>
+  <text x="372" y="121" class="small">FULL: value</text>
+  <text x="372" y="134" class="small">SWA: value</text>
+
+  <rect x="474" y="82" width="98" height="58" rx="4" class="card"/>
+  <text x="486" y="103" class="card-title">N4 · 4</text>
+  <text x="486" y="121" class="small">FULL: value</text>
+  <text x="486" y="134" class="small">SWA: value</text>
+
+  <!-- window bracket -->
+  <path d="M360 160 H572" stroke="#2f6f62" stroke-width="1.3" fill="none"/>
+  <path d="M360 154 V166 M572 154 V166" stroke="#2f6f62" stroke-width="1.3"/>
+  <text x="368" y="179" class="small accent">窗口内：最近 8 tokens</text>
+
+  <!-- outside labels -->
+  <text x="132" y="74" class="tag amber">窗外 · LRU 4</text>
+  <text x="246" y="74" class="tag amber">窗外</text>
+  <text x="360" y="74" class="tag accent">窗口内</text>
+  <text x="474" y="74" class="tag accent">窗口内</text>
+
+  <!-- M intermediate -->
+  <text x="220" y="210" class="tag amber">LRU 2 · 窗外 → 选中</text>
+  <rect x="220" y="218" width="140" height="64" rx="4" class="card-tomb"/>
+  <text x="232" y="240" class="card-title">M · 4 tokens</text>
+  <text x="232" y="258" class="small red">SWA: None（tombstone）</text>
+  <text x="232" y="272" class="small">FULL: value 保留</text>
+
+  <!-- L1 leaf deleted -->
+  <text x="132" y="332" class="tag red">LRU 1 · 最旧 → 删除</text>
+  <rect x="132" y="340" width="120" height="56" rx="4" class="card-del"/>
+  <text x="144" y="361" class="card-title">L1 · leaf</text>
+  <text x="144" y="378" class="small">SWA: value</text>
+  <text x="144" y="391" class="small red">直接删除</text>
+  <path d="M240 346 L248 354 M248 346 L240 354" stroke="#a33a32" stroke-width="1.6"/>
+
+  <!-- L2 kept -->
+  <text x="270" y="332" class="tag">LRU 3 · 未选中</text>
+  <rect x="270" y="340" width="120" height="56" rx="4" class="card"/>
+  <text x="282" y="361" class="card-title">L2 · leaf</text>
+  <text x="282" y="378" class="small">SWA: value</text>
+  <text x="282" y="391" class="small">本轮未选中</text>
+
+  <!-- callouts right -->
+  <rect x="610" y="210" width="266" height="84" rx="4" fill="#fbf3e9" stroke="#b9814c"/>
+  <text x="624" y="230" class="tag amber">② 中间结点</text>
+  <text x="624" y="248" class="small-dark">SWA: value → None（tombstone）</text>
+  <text x="624" y="264" class="small">FULL: value 保留；结点和子结点都不删除。</text>
+  <text x="624" y="280" class="small">因此后续 FULL 匹配仍可经过 M。</text>
+
+  <rect x="610" y="320" width="266" height="82" rx="4" fill="#fdf3f2" stroke="#c98b86"/>
+  <text x="624" y="340" class="tag red">① 叶子结点</text>
+  <text x="624" y="358" class="small-dark">L1 是叶子，且窗外 + LRU 最旧。</text>
+  <text x="624" y="374" class="small">SWA component 直接删除 L1；</text>
+  <text x="624" y="390" class="small">不需要再留 tombstone。</text>
+
+  <!-- bottom summary -->
+  <rect x="24" y="450" width="852" height="82" rx="4" fill="#f7f9fa" stroke="#dfe4ea"/>
+  <text x="38" y="470" class="tag accent">EVICTION RESULT</text>
+  <text x="38" y="490" class="small-dark">L1（叶子）→ 直接删除；M（中间结点）→ SWA=None、FULL 保留；N1/N2/L2 未被 LRU 选中，保留。</text>
+  <text x="38" y="508" class="small">窗外 ≠ 立即失效：窗外只是相对当前路径的窗口；同一结点可能在别的请求/前缀的窗口内。</text>
+  <text x="38" y="524" class="small">只有被独立 LRU 选中的 L1、M 才处理；SWA 只是结点上的一个 component value，不等于整个结点。</text>
+</svg>

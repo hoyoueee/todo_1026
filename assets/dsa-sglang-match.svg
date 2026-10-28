@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" role="img" aria-labelledby="title desc">
+  <title id="title">DSA / SGLang 匹配示例</title>
+  <desc id="desc">Unified Radix Cache 的 token 前缀树：请求沿树匹配到 B，节点 value 给出 page id 列表，main MLA page 和 index K page 通过同一组 page id 一起复用。</desc>
+  <style>
+    text { font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+    .title { font-size: 20px; font-weight: 600; fill: #1b2530; }
+    .sub { font-size: 10.5px; fill: #6b7785; }
+    .card-title { font-size: 10.5px; font-weight: 600; fill: #1b2530; }
+    .small { font-size: 9px; fill: #6b7785; }
+    .small-dark { font-size: 9px; fill: #3d4a57; }
+    .tag { font-size: 8.5px; letter-spacing: .03em; }
+    .accent { fill: #2f6f62; }
+    .muted { fill: #6b7785; }
+    .line { stroke: #cbd2d9; stroke-width: 1.5; fill: none; }
+    .line-match { stroke: #2f6f62; stroke-width: 2; fill: none; }
+    .card { fill: #ffffff; stroke: #cbd2d9; stroke-width: 1; }
+    .card-soft { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; }
+    .card-match { fill: #e8f1ee; stroke: #2f6f62; stroke-width: 1.5; }
+    .card-other { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; stroke-dasharray: 5 4; }
+  </style>
+
+  <rect width="900" height="500" fill="#ffffff"/>
+  <text x="24" y="32" class="title">DSA / SGLang · 匹配示例</text>
+  <text x="24" y="54" class="sub">Unified Radix Cache · token 前缀树 · 节点 value = page id 列表 · page_size = 64（示例）</text>
+  <text x="876" y="32" text-anchor="end" class="tag accent">PAGE-ALIGNED</text>
+
+  <!-- 连线 -->
+  <path class="line-match" d="M116 110 H150"/>
+  <path class="line-match" d="M235 138 V170 H185 V200"/>
+  <path class="line" d="M235 138 V170 H385 V200"/>
+  <path class="line" d="M185 256 V320"/>
+
+  <!-- root -->
+  <rect x="24" y="82" width="92" height="56" rx="4" class="card-soft"/>
+  <text x="38" y="104" class="card-title">root</text>
+  <text x="38" y="122" class="small">value: —</text>
+
+  <!-- A matched -->
+  <rect x="150" y="82" width="170" height="56" rx="4" class="card-match"/>
+  <text x="164" y="103" class="card-title">A · "Once upon"</text>
+  <text x="164" y="122" class="small accent">value [P0, P1]</text>
+
+  <!-- B matched -->
+  <rect x="100" y="200" width="170" height="56" rx="4" class="card-match"/>
+  <text x="114" y="221" class="card-title">B · " a time"</text>
+  <text x="114" y="240" class="small accent">value [P2]</text>
+
+  <!-- C other branch -->
+  <rect x="310" y="200" width="150" height="56" rx="4" class="card-other"/>
+  <text x="324" y="221" class="card-title">C · " a ..."</text>
+  <text x="324" y="240" class="small">value [P4]</text>
+
+  <!-- D child of B, not matched -->
+  <rect x="100" y="320" width="170" height="56" rx="4" class="card-other"/>
+  <text x="114" y="341" class="card-title">D · " there"</text>
+  <text x="114" y="360" class="small">value [P3]</text>
+
+  <!-- request -->
+  <rect x="560" y="180" width="316" height="112" rx="4" fill="#f7f9fa" stroke="#dfe4ea"/>
+  <text x="576" y="202" class="tag accent">REQUEST</text>
+  <text x="576" y="224" class="small-dark">"Once upon a time and ..."</text>
+  <text x="576" y="243" class="small">token 序列按 page_size 对齐</text>
+  <text x="576" y="261" class="small">沿 radix tree 逐 token 比较 → 命中 A + B</text>
+  <text x="576" y="279" class="small">C 是另一分支；D 在 B 之后，但请求没走到</text>
+
+  <!-- result -->
+  <rect x="24" y="406" width="852" height="70" rx="4" fill="#e8f1ee" stroke="#2f6f62"/>
+  <text x="40" y="427" class="tag accent">MATCH RESULT</text>
+  <text x="40" y="447" class="small-dark">matched page ids = [P0, P1, P2] → main MLA page + index K page 一起复用；B 之后的 suffix 重新计算。</text>
+  <text x="40" y="464" class="small">Index K 不单独匹配；top-k 不进入这棵树；页面数据仍由同一个 page id 关联。</text>
+</svg>

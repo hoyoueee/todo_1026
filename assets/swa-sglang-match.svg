@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" role="img" aria-labelledby="title desc">
+  <title id="title">SGLang SWA 匹配示例</title>
+  <desc id="desc">Unified Radix Cache 的匹配路径：root 累计长度为正无穷，遇到 tombstone 归零，随后累计到超过窗口长度时得到最佳匹配边界。</desc>
+  <style>
+    text { font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+    .title { font-size: 20px; font-weight: 600; fill: #1b2530; }
+    .sub { font-size: 10.5px; fill: #6b7785; }
+    .card-title { font-size: 11.5px; font-weight: 600; fill: #1b2530; }
+    .small { font-size: 9.5px; fill: #6b7785; }
+    .small-dark { font-size: 9.5px; fill: #3d4a57; }
+    .tag { font-size: 8.5px; letter-spacing: .04em; }
+    .accent { fill: #2f6f62; }
+    .red { fill: #a33a32; }
+    .amber { fill: #8a5a33; }
+    .line { stroke: #cbd2d9; stroke-width: 1.5; fill: none; }
+    .card { fill: #ffffff; stroke: #cbd2d9; stroke-width: 1; }
+    .card-soft { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; }
+    .card-tomb { fill: #fdf3f2; stroke: #c98b86; stroke-width: 1.3; }
+    .card-bound { fill: #e8f1ee; stroke: #2f6f62; stroke-width: 2; }
+    .card-other { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; stroke-dasharray: 5 4; }
+  </style>
+
+  <rect width="900" height="500" fill="#ffffff"/>
+  <text x="24" y="32" class="title">SGLang SWA · 匹配示例</text>
+  <text x="24" y="54" class="sub">Unified Radix Cache · window = 8 tokens（示例）· 从 root 开始，累计长度 len = +∞</text>
+  <text x="876" y="32" text-anchor="end" class="tag accent">WINDOW = 8</text>
+
+  <!-- 连线 -->
+  <path class="line" d="M116 111 H140"/>
+  <path class="line" d="M272 111 H296"/>
+  <path class="line" d="M428 111 H452"/>
+  <path class="line" d="M584 111 H608"/>
+  <path class="line" d="M362 140 V210"/>
+
+  <!-- root -->
+  <rect x="24" y="82" width="92" height="58" rx="4" class="card-soft"/>
+  <text x="38" y="104" class="card-title">root</text>
+  <text x="38" y="123" class="small">len = +∞</text>
+  <text x="38" y="137" class="small">起点</text>
+
+  <!-- A tombstone -->
+  <rect x="140" y="82" width="132" height="58" rx="4" class="card-tomb"/>
+  <text x="152" y="104" class="card-title">A · 4 tokens</text>
+  <text x="152" y="123" class="small red">SWA: tombstone</text>
+  <text x="152" y="137" class="small">len = 0</text>
+
+  <!-- B -->
+  <rect x="296" y="82" width="132" height="58" rx="4" class="card"/>
+  <text x="308" y="104" class="card-title">B · 4 tokens</text>
+  <text x="308" y="123" class="small accent">SWA: value</text>
+  <text x="308" y="137" class="small">len = 4</text>
+
+  <!-- C -->
+  <rect x="452" y="82" width="132" height="58" rx="4" class="card"/>
+  <text x="464" y="104" class="card-title">C · 4 tokens</text>
+  <text x="464" y="123" class="small accent">SWA: value</text>
+  <text x="464" y="137" class="small">len = 8（≤ 8）</text>
+
+  <!-- D boundary -->
+  <text x="608" y="74" class="tag accent">最佳匹配边界</text>
+  <rect x="608" y="82" width="160" height="58" rx="4" class="card-bound"/>
+  <text x="620" y="104" class="card-title">D · 4 tokens</text>
+  <text x="620" y="123" class="small accent">SWA: value</text>
+  <text x="620" y="137" class="small-dark">len = 12 &gt; 8</text>
+
+  <!-- E branch -->
+  <rect x="296" y="210" width="132" height="56" rx="4" class="card-other"/>
+  <text x="308" y="232" class="card-title">E · 4 tokens</text>
+  <text x="308" y="250" class="small">另一分支</text>
+  <text x="308" y="263" class="small">不参与本次路径</text>
+
+  <!-- 累计长度 ribbon -->
+  <rect x="24" y="286" width="852" height="68" rx="4" fill="#f7f9fa" stroke="#dfe4ea"/>
+  <text x="38" y="306" class="tag accent">CUMULATIVE LENGTH</text>
+  <text x="38" y="325" class="small-dark">root +∞  →  A tombstone 归零  →  B 4  →  C 8（不大于 8）  →  D 12 &gt; 8</text>
+  <text x="38" y="342" class="small">→ 最佳边界 = D；tombstone 只把累计长度归 0，FULL 数据仍保留在 A 上。</text>
+
+  <!-- legend -->
+  <rect x="24" y="380" width="11" height="11" fill="#ffffff" stroke="#cbd2d9"/>
+  <text x="41" y="390" class="small">SWA: value</text>
+  <rect x="132" y="380" width="11" height="11" fill="#fdf3f2" stroke="#c98b86"/>
+  <text x="149" y="390" class="small">tombstone / SWA=None</text>
+  <rect x="300" y="380" width="11" height="11" fill="#e8f1ee" stroke="#2f6f62" stroke-width="2"/>
+  <text x="317" y="390" class="small">匹配边界</text>
+  <text x="24" y="420" class="small">说明：窗口长度为 8；C 的累计长度正好等于 8，按“大于窗口”规则不记为边界；D 的 12 才越过窗口。</text>
+  <text x="24" y="441" class="small">tombstone 出现在 A，因此累计长度从 A 之后重新从 0 开始累计，而不是继续沿用 root 的 +∞。</text>
+  <text x="24" y="462" class="small">匹配停在最佳边界 D；A 的 FULL attention value 仍然保留，SWA 数据为 None。</text>
+</svg>

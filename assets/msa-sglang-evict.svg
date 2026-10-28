@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540" viewBox="0 0 900 540" role="img" aria-labelledby="title desc">
+  <title id="title">MSA / SGLang 驱逐示例</title>
+  <desc id="desc">Unified Radix Cache 的叶级 LRU 驱逐：叶子 D 被选中后从树中删除，page id P3 释放，main GQA page 3 和 index K page 3 一起失效。</desc>
+  <style>
+    text { font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+    .title { font-size: 20px; font-weight: 600; fill: #1b2530; }
+    .sub { font-size: 10.5px; fill: #6b7785; }
+    .card-title { font-size: 10.5px; font-weight: 600; fill: #1b2530; }
+    .small { font-size: 9px; fill: #6b7785; }
+    .small-dark { font-size: 9px; fill: #3d4a57; }
+    .tag { font-size: 8.5px; letter-spacing: .03em; }
+    .accent { fill: #2f6f62; }
+    .red { fill: #a33a32; }
+    .line { stroke: #cbd2d9; stroke-width: 1.5; fill: none; }
+    .line-red { stroke: #c98b86; stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+    .card { fill: #ffffff; stroke: #cbd2d9; stroke-width: 1; }
+    .card-soft { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; }
+    .card-del { fill: #fdf3f2; stroke: #c98b86; stroke-width: 1.4; stroke-dasharray: 5 4; }
+    .card-other { fill: #fbfcfd; stroke: #cbd2d9; stroke-width: 1; stroke-dasharray: 5 4; }
+  </style>
+
+  <rect width="900" height="540" fill="#ffffff"/>
+  <text x="24" y="32" class="title">MSA / SGLang · 驱逐示例</text>
+  <text x="24" y="54" class="sub">Unified Radix Cache · radix leaf LRU · page_size = 128（示例）· index_k_pool 没有独立 free</text>
+  <text x="876" y="32" text-anchor="end" class="tag accent">LEAF LRU</text>
+
+  <!-- 连线 -->
+  <path class="line" d="M114 108 H150"/>
+  <path class="line" d="M235 136 V170 H170 V200"/>
+  <path class="line" d="M235 136 V170 H385 V200"/>
+  <path class="line" d="M170 254 V290 H105 V320"/>
+  <path class="line" d="M170 254 V290 H255 V320"/>
+
+  <!-- root -->
+  <rect x="24" y="82" width="90" height="52" rx="4" class="card-soft"/>
+  <text x="38" y="103" class="card-title">root</text>
+  <text x="38" y="120" class="small">value: —</text>
+
+  <!-- A -->
+  <rect x="150" y="82" width="170" height="54" rx="4" class="card"/>
+  <text x="164" y="103" class="card-title">A · "Once upon"</text>
+  <text x="164" y="121" class="small">value [P0, P1]</text>
+
+  <!-- B -->
+  <text x="90" y="192" class="tag">LRU 2</text>
+  <rect x="90" y="200" width="160" height="54" rx="4" class="card"/>
+  <text x="104" y="221" class="card-title">B · " a time"</text>
+  <text x="104" y="239" class="small">value [P2]</text>
+
+  <!-- C other branch -->
+  <text x="310" y="192" class="tag">LRU 4 · 未选中</text>
+  <rect x="310" y="200" width="150" height="54" rx="4" class="card-other"/>
+  <text x="324" y="221" class="card-title">C · " a ..."</text>
+  <text x="324" y="239" class="small">value [P5]</text>
+
+  <!-- D victim -->
+  <text x="40" y="312" class="tag red">LRU 1 · leaf → 删除</text>
+  <rect x="40" y="320" width="130" height="54" rx="4" class="card-del"/>
+  <text x="54" y="341" class="card-title">D · " there"</text>
+  <text x="54" y="359" class="small">value [P3]</text>
+  <path d="M154 326 L162 334 M162 326 L154 334" stroke="#a33a32" stroke-width="1.6"/>
+
+  <!-- E keep -->
+  <text x="190" y="312" class="tag">LRU 3 · 未选中</text>
+  <rect x="190" y="320" width="130" height="54" rx="4" class="card"/>
+  <text x="204" y="341" class="card-title">E · " again"</text>
+  <text x="204" y="359" class="small">value [P4]</text>
+
+  <!-- callout -->
+  <rect x="500" y="100" width="376" height="170" rx="4" fill="#fdf3f2" stroke="#c98b86"/>
+  <text x="516" y="122" class="tag red">LEAF EVICTION</text>
+  <text x="516" y="144" class="small-dark">D 是叶子，且 RadixCache 的 LRU 最旧。</text>
+  <text x="516" y="164" class="small-dark">free_segment([P3])：把 D 的 page id 还给 allocator。</text>
+  <text x="516" y="184" class="small">main GQA page 3 + index K page 3 一起不可达。</text>
+  <text x="516" y="204" class="small">index_k_pool 没有单独的 free；page id 复用后旧 page 被覆盖。</text>
+  <text x="516" y="224" class="small">lock_ref &gt; 0 的活跃请求受保护，不进入本轮 LRU。</text>
+  <text x="516" y="244" class="small">D 从树中移除；E、C 保留。</text>
+
+  <!-- result -->
+  <rect x="24" y="420" width="852" height="86" rx="4" fill="#f7f9fa" stroke="#dfe4ea"/>
+  <text x="40" y="442" class="tag accent">EVICTION RESULT</text>
+  <text x="40" y="462" class="small-dark">D（leaf）→ 删除；page id [P3] 释放；E/C 保留；main GQA page 3 与 index page 3 一起失效。</text>
+  <text x="40" y="480" class="small">RadixCache 只有一棵树；page id 是连接 main 和 index 的唯一纽带，Index K 不单独驱逐。</text>
+  <text x="40" y="497" class="small">驱逐单位是 leaf 的 page id segment，不按层释放；这与 Unified Radix Cache 的树结构一致。</text>
+</svg>
